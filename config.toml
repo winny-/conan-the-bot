@@ -1,0 +1,8 @@
+[[network]]
+name = "rizon"
+host = "irc.rizon.net"
+ssl = true
+port = 6697
+nick = "conan-the-bot"
+channels = ["#winny"]
+verify_ssl = false

@@ -1,16 +1,16 @@
 /*
  * Copyright (C) 2004-2009 Georgy Yunaev gyunaev@ulduzsoft.com
  *
- * This example is free, and not covered by LGPL license. There is no 
+ * This example is free, and not covered by LGPL license. There is no
  * restriction applied to their modification, redistribution, using and so on.
- * You can study them, modify them, use them in your own program - either 
+ * You can study them, modify them, use them in your own program - either
  * completely or partially. By using it you may give me some credits in your
  * program, but you don't have to.
  *
  *
  * This example tests most features of libirc. It can join the specific
  * channel, welcoming all the people there, and react on some messages -
- * 'help', 'quit', 'dcc chat', 'dcc send', 'ctcp'. Also it can reply to 
+ * 'help', 'quit', 'dcc chat', 'dcc send', 'ctcp'. Also it can reply to
  * CTCP requests, receive DCC files and accept DCC chats.
  *
  * Features used:
@@ -29,9 +29,28 @@
 #include <stdarg.h>
 #include <string.h>
 #include <stdlib.h>
+#include <error.h>
 
 #include "libircclient.h"
+#include "toml.h"
 
+struct bot_config
+{
+	struct network_config **networks;
+};
+
+/*
+ * The IRC Network configuration object.
+ */
+struct network_config
+{
+	char *host;
+	unsigned short port;
+	char *nick;
+	char **channels;
+	char ssl;
+	char verify_ssl;
+};
 
 /*
  * We store data in IRC session context.
@@ -105,7 +124,7 @@ void event_privmsg (irc_session_t * session, const char * event, const char * or
 {
 	dump_event (session, event, origin, params, count);
 
-	printf ("'%s' said me (%s): %s\n", 
+	printf ("'%s' said me (%s): %s\n",
 		origin ? origin : "someone",
 		params[0], params[1] );
 }
@@ -128,7 +147,7 @@ void dcc_recv_callback (irc_session_t * session, irc_dcc_t id, int status, void 
 			printf ("DCC %d: chat connected\n", id);
 			irc_dcc_msg	(session, id, "Hehe");
 		}
-		else 
+		else
 		{
 			printf ("DCC %d: %s\n", id, data);
 			sprintf (buf, "DCC [%d]: %d", id, count++);
@@ -175,7 +194,7 @@ void event_channel (irc_session_t * session, const char * event, const char * or
 	if ( count != 2 )
 		return;
 
-	printf ("'%s' said in channel %s: %s\n", 
+	printf ("'%s' said in channel %s: %s\n",
 		origin ? origin : "someone",
 		params[0], params[1] );
 
@@ -257,19 +276,87 @@ void event_numeric (irc_session_t * session, unsigned int event, const char * or
 	dump_event (session, buf, origin, params, count);
 }
 
+static void my_toml_error(const char *msg, const char *msg1)
+{
+    fprintf(stderr, "ERROR: %s%s\n", msg, msg1?msg1:"");
+    exit(1);
+}
+
+char parse_toml(FILE *fp, struct bot_config **cfg)
+{
+	char errbuf[200];
+	toml_table_t *root = toml_parse_file(fp, errbuf, sizeof(errbuf));
+	if (!root) {
+		my_toml_error("cannot parse - ", errbuf);
+	}
+	toml_array_t *nets = toml_array_in(root, "network");
+	struct bot_config *bot_config = malloc(sizeof(struct bot_config));
+	bot_config->networks = calloc(1, sizeof(struct network_config *));
+	if (!nets) {
+		my_toml_error("cannot parse - no [[network]]", "");
+	}
+	size_t net_count = 0;
+	for (int i = 0; i < toml_array_nelem(nets) ; i++, net_count++) {
+		toml_table_t *the_net = toml_table_at(nets, i);
+		if (!the_net) {
+			my_toml_error("cannot parse [networks] :/", "");
+		}
+		bot_config->networks = reallocarray(bot_config->networks, net_count + 2, sizeof(struct network_config *));
+		struct network_config *netcfg = bot_config->networks[net_count] = malloc(sizeof(struct network_config));
+		memset(bot_config->networks + net_count + 1, 0, sizeof(struct network_config *));
+		toml_datum_t host = toml_string_in(the_net, "host");
+		if (!host.ok) {
+			my_toml_error("cannot parse network host", "");
+		}
+		netcfg->host = strdup(host.u.s);
+		free(host.u.s);
+		toml_datum_t port = toml_int_in(the_net, "port");
+		if (!port.ok || port.u.i > 65535 || port.u.i < 0) {
+			my_toml_error("cannot parse network port", "");
+		}
+		netcfg->port = (unsigned short)port.u.i;
+		toml_datum_t ssl = toml_bool_in(the_net, "ssl");
+		netcfg->ssl = ssl.ok && ssl.u.b;
+		toml_array_t *channels = toml_array_in(the_net, "channels");
+		size_t channel_len = toml_array_nelem(channels);
+		netcfg->channels = calloc(channel_len + 1, sizeof(char **));
+		for (size_t j = 0; j < channel_len; j++) {
+			toml_datum_t the_channel = toml_string_at(channels, j);
+			if (!the_channel.ok) {
+				my_toml_error("cannot parse channel", "");
+			}
+			netcfg->channels[j] = strdup(the_channel.u.s);
+			free(the_channel.u.s);
+		}
+		toml_datum_t nick = toml_string_in(the_net, "nick");
+		if (!nick.ok) {
+			my_toml_error("cannot parse nick", "");
+		}
+		netcfg->nick = strdup(nick.u.s);
+		free(nick.u.s);
+		toml_datum_t verify_ssl = toml_bool_in(the_net, "verify_ssl");
+		netcfg->verify_ssl = verify_ssl.ok ? verify_ssl.u.b : 1;
+	}
+	*cfg = bot_config;
+	return 0;
+}
+
 
 int main (int argc, char **argv)
 {
 	irc_callbacks_t	callbacks;
 	irc_ctx_t ctx;
 	irc_session_t * s;
-	unsigned short port = 6667;
 
-	if ( argc != 4 )
+	if ( argc != 2 )
 	{
-		printf ("Usage: %s <server> <nick> <channel>\n", argv[0]);
+		printf ("Usage: %s <config.toml>\n", argv[0]);
 		return 1;
 	}
+
+	FILE *fp = fopen(argv[1], "r");
+	struct bot_config *cfg;
+	parse_toml(fp, &cfg);
 
 	memset (&callbacks, 0, sizeof(callbacks));
 
@@ -302,27 +389,23 @@ int main (int argc, char **argv)
 		return 1;
 	}
 
-	ctx.channel = argv[3];
-    ctx.nick = argv[2];
+	ctx.channel = cfg->networks[0]->channels[0];
+	ctx.nick = cfg->networks[0]->nick;
 
 	irc_set_ctx (s, &ctx);
 
-	// If the port number is specified in the server string, use the port 0 so it gets parsed
-	if ( strchr( argv[1], ':' ) != 0 )
-		port = 0;
+	char *host = cfg->networks[0]->host;
+	if (cfg->networks[0]->ssl) {
+		host = malloc(strlen(host) + 2);
+		sprintf(host, "#%s", cfg->networks[0]->host);
+	}
 
-	// To handle the "SSL certificate verify failed" from command line we allow passing ## in front 
-	// of the server name, and in this case tell libircclient not to verify the cert
-	if ( argv[1][0] == '#' && argv[1][1] == '#' )
-	{
-		// Skip the first character as libircclient needs only one # for SSL support, i.e. #irc.freenode.net
-		argv[1]++;
-		
+	if (!cfg->networks[0]->verify_ssl) {
 		irc_option_set( s, LIBIRC_OPTION_SSL_NO_VERIFY );
 	}
-	
+
 	// Initiate the IRC server connection
-	if ( irc_connect (s, argv[1], port, 0, argv[2], 0, 0) )
+	if ( irc_connect (s, host, cfg->networks[0]->port, 0, cfg->networks[0]->nick, 0, 0) )
 	{
 		printf ("Could not connect: %s\n", irc_strerror (irc_errno(s)));
 		return 1;
