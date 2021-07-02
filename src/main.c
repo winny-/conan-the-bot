@@ -31,8 +31,9 @@
 #include <stdlib.h>
 #include <error.h>
 
-#include "libircclient.h"
+#include "libircclient/libircclient.h"
 #include "toml.h"
+#include "curl/curl.h"
 
 struct bot_config
 {
@@ -186,6 +187,32 @@ void dcc_file_recv_callback (irc_session_t * session, irc_dcc_t id, int status, 
 	}
 }
 
+char *get_title(char *url) {
+	char *ret = NULL;
+	CURL *curl = curl_easy_init();
+	curl_easy_setopt(curl, CURLOPT_URL, url);
+	curl_easy_setopt(curl, CURLOPT_NOBODY, 1);
+	CURLcode res = curl_easy_perform(curl);
+	if (res) {
+		#define COULD_NOT_HEAD "Could not HEAD %s"
+		size_t str_len = strlen(url) + strlen(COULD_NOT_HEAD);
+		ret = calloc(str_len + 1, sizeof(char));
+		snprintf(ret, str_len, COULD_NOT_HEAD, url);
+	} else {
+		char *ct = NULL;
+		res = curl_easy_getinfo(curl, CURLINFO_CONTENT_TYPE, &ct);
+		if (res) {
+			ct = NULL;
+		}
+		double len;
+		res = curl_easy_getinfo(curl, CURLINFO_CONTENT_LENGTH_DOWNLOAD, &len);
+		ret = calloc(1001, sizeof(char));
+		snprintf(ret, 1000, "%s, %d bytes", ct, (int)len);
+	}
+	curl_easy_cleanup(curl);
+	return ret;
+}
+
 
 void event_channel (irc_session_t * session, const char * event, const char * origin, const char ** params, unsigned int count)
 {
@@ -202,6 +229,17 @@ void event_channel (irc_session_t * session, const char * event, const char * or
 		return;
 
 	irc_target_get_nick (origin, nickbuf, sizeof(nickbuf));
+
+	if ( strstr(params[1], "title ") == params[1]) {
+		char *title = get_title(params[1] + strlen("title "));
+		if (title) {
+			irc_cmd_msg(session, params[0], title);
+		}
+	}
+
+	if ( !strcmp(params[1], ".bots")) {
+		irc_cmd_msg (session, params[0], "Reporting in! [C] https://github.com/winny-/conan-the-bot");
+	}
 
 	if ( !strcmp (params[1], "quit") )
 		irc_cmd_quit (session, "of course, Master!");
@@ -353,6 +391,8 @@ int main (int argc, char **argv)
 		printf ("Usage: %s <config.toml>\n", argv[0]);
 		return 1;
 	}
+
+	curl_global_init(CURL_GLOBAL_ALL);
 
 	FILE *fp = fopen(argv[1], "r");
 	struct bot_config *cfg;
